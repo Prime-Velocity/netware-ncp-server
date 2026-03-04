@@ -1,0 +1,20 @@
+{
+  "name": "netware-ncp-server",
+  "version": "1.0.0",
+  "description": "Novell NetWare NCP server with GitHub backend",
+  "main": "ncp-server.js",
+  "scripts": {
+    "start": "node ncp-server.js",
+    "test": "node test-ncp.js"
+  },
+  "keywords": [
+    "netware",
+    "ncp",
+    "novell",
+    "github",
+    "filesystem",
+    "vintage"
+  ],
+  "author": "Brandon Clark",
+  "license": "MIT"
+}
