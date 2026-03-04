@@ -1,37 +1,49 @@
-# NetWare NCP Server - Node.js Implementation
+# netware-ncp-server
 
-**2,361 lines of Novell NetWare Core Protocol (NCP) implementation with GitHub backend**
+**The open reference implementation of the STCS (Structured Transport and Communication Specification).**
+
+A complete NetWare 3.12-compatible NCP server in Node.js, using GitHub as the backing store.
+2,361 lines. Production-grade protocol implementation. Apache 2.0.
+
+> _This started as a joke this morning. It is no longer a joke._
+
+---
 
 ## What This Is
 
-A complete NetWare 3.12-compatible NCP server that uses GitHub as the backing store.
+NetWare Core Protocol (NCP) — the session and transport layer that powered enterprise
+networks through the 1990s — reimplemented in Node.js with GitHub as the filesystem backend.
 
-- **NCP Server** over UDP port 524
-- **GitHub as filesystem** (every write = commit, TTS = branches)
-- **Bindery authentication** (user database)
-- **Full transactional support** (TTS via branches + PR merges)
+Every file write is a commit. Every transaction is a branch and PR merge. Every directory
+listing is a tree fetch. The Bindery (NetWare's identity system) maps cleanly to GitHub's
+user and permission model.
 
-## Files (2,361 lines total)
+What began as an experiment in unlikely mappings turned into something more significant:
+a viable protocol foundation for distributed, Git-native infrastructure. That realization
+is what STCS formalizes.
 
-- `ncp-server.js` (451 lines) - NCP protocol server
-- `ncp-packet.js` (307 lines) - Packet parsing/building
-- `ncp-client.js` (388 lines) - NCP client
-- `nw-bindery.js` (540 lines) - User authentication database
-- `nw-file-service.js` (295 lines) - File operations
-- `nw-github-volume.js` (380 lines) - GitHub backend adapter
+## Architecture
 
-## The Genius Mapping
+- **NCP Server** (`ncp-server.js`, 451 lines) — UDP port 524, full connection state machine
+- **Packet layer** (`ncp-packet.js`, 307 lines) — NCP framing, parsing, and building
+- **NCP Client** (`ncp-client.js`, 388 lines) — compatible client implementation
+- **Bindery** (`nw-bindery.js`, 540 lines) — identity and authentication, GitHub-backed
+- **File service** (`nw-file-service.js`, 295 lines) — file operations
+- **GitHub volume** (`nw-github-volume.js`, 380 lines) — GitHub API adapter
 
-| NetWare Operation | GitHub API |
-|-------------------|------------|
-| Write file | Create commit |
-| TTS Begin | Create branch |
-| TTS End | Merge PR (atomic!) |
-| TTS Abort | Delete branch |
-| Read file | Get blob |
-| List directory | Get tree |
+## The Mapping
+
+| NetWare Operation | GitHub API            |
+|-------------------|-----------------------|
+| Write file        | Create commit         |
+| TTS Begin         | Create branch         |
+| TTS End           | Merge PR (atomic)     |
+| TTS Abort         | Delete branch         |
+| Read file         | Get blob              |
+| List directory    | Get tree              |
 
 **Every file operation is a Git commit. Every transaction is a branch + PR merge.**
+This is not a trick — it is architecturally correct.
 
 ## Usage
 
@@ -42,7 +54,7 @@ const server = new NCPServer({
   port: 524,
   github: {
     token: 'ghp_...',
-    owner: 'bclark00',
+    owner: 'your-org',
     repo: 'netware-volume'
   }
 });
@@ -50,40 +62,29 @@ const server = new NCPServer({
 server.start();
 ```
 
-## NetWare Client
+Any NetWare 3.12 client connects normally: DOS (NETX/VLM), Windows (Client32), or modern NCP clients.
 
-Any NetWare 3.12 client can connect:
-- DOS client with NETX/VLM
-- Windows client with Client32
-- Modern NCP client
+## Protocol Coverage
 
-## Implementation Notes
+NCP functions implemented:
 
-Ported from TurboPower BTF NWBase.PAS / NWConn.PAS
+- `0x61` Create Service Connection
+- `0x17` Bindery (all sub-functions)
+- `0x20` Semaphores
+- `0x21` Broadcast messages
+- `0x22` TTS (Transactional Tracking System)
+- `0x63` Logout
 
-Functions implemented:
-- 0x61: Create Service Connection
-- 0x17: Bindery (all sub-functions)
-- 0x20: Semaphores
-- 0x22: TTS (Transactional Tracking System)
-- 0x21: Broadcast messages
-- 0x63: Logout
+## Provenance
 
-## Why This Exists
-
-Because we can. And because GitHub makes an excellent transactional filesystem.
-
----
-
-💀🔥🚀 **"Run NetWare 3.12 on GitHub. Because why not."**
-
----
+Ported from TurboPower Pascal sources (NWBase.PAS / NWConn.PAS, circa 199x).
+The Node.js implementation, GitHub-backed architecture, and STCS formalization
+are original work by Genesis Systems.
 
 ## STCS & the Genesis Ecosystem
 
-This repository is the canonical open reference implementation of the
-**STCS (Structured Transport and Communication Specification)** — a modern
-recast of the NetWare Core Protocol for GitHub-backed, cloud-native infrastructure.
+This repository is the canonical open reference implementation of **STCS** —
+the protocol specification that formalizes this architecture for production use.
 
 | Layer | What it is | License |
 |---|---|---|
@@ -92,14 +93,15 @@ recast of the NetWare Core Protocol for GitHub-backed, cloud-native infrastructu
 | Genesis Core | Production stack + integrations | Commercial / Partner |
 | Certified builds | Validated Genesis-compatible products | Commercial license |
 
+The open reference exists to prove the protocol works and give the community a
+foundation. Genesis Core is where production hardening, SLAs, and full ecosystem
+integration live. See [COMMERCIAL.md](COMMERCIAL.md).
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
 
 Copyright 2025 Genesis Systems (a dba of Exponential Systems)
-
-Ported from TurboPower Pascal sources (NWBase.PAS / NWConn.PAS, circa 199x).
-The Node.js implementation and GitHub-backed architecture are original work.
 
 **Commercial Genesis ecosystem integrations, certified implementations, and
 enterprise support are available via Genesis Systems.**
