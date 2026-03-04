@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2025 Genesis Systems (a dba of Exponential Systems)
 'use strict';
 /**
  * nw-file-service.js  --  NCP File Service

@@ -76,3 +76,31 @@ Because we can. And because GitHub makes an excellent transactional filesystem.
 ---
 
 💀🔥🚀 **"Run NetWare 3.12 on GitHub. Because why not."**
+
+---
+
+## STCS & the Genesis Ecosystem
+
+This repository is the canonical open reference implementation of the
+**STCS (Structured Transport and Communication Specification)** — a modern
+recast of the NetWare Core Protocol for GitHub-backed, cloud-native infrastructure.
+
+| Layer | What it is | License |
+|---|---|---|
+| This repo | STCS reference implementation | Apache 2.0 (open) |
+| STCS RFC/Spec | Protocol specification | Genesis Systems Proprietary |
+| Genesis Core | Production stack + integrations | Commercial / Partner |
+| Certified builds | Validated Genesis-compatible products | Commercial license |
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).
+
+Copyright 2025 Genesis Systems (a dba of Exponential Systems)
+
+Ported from TurboPower Pascal sources (NWBase.PAS / NWConn.PAS, circa 199x).
+The Node.js implementation and GitHub-backed architecture are original work.
+
+**Commercial Genesis ecosystem integrations, certified implementations, and
+enterprise support are available via Genesis Systems.**
+See [COMMERCIAL.md](COMMERCIAL.md) for details.
