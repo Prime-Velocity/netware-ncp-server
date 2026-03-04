@@ -5,7 +5,9 @@
   "main": "ncp-server.js",
   "scripts": {
     "start": "node ncp-server.js",
-    "test": "node test-ncp.js"
+    "webhook": "node ncp-webhook-client.js",
+    "test": "node test-ncp.js",
+    "test:webhook": "node test-webhook-client.js"
   },
   "keywords": [
     "netware",
