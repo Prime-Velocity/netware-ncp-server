@@ -19,7 +19,7 @@
 const dgram  = require('dgram');
 const {
   NCP_FUNC, BIND_SUB, SEMA_SUB, TTS_SUB, BCAST_SUB, ERR, OBJ_TYPE,
-  buildRequest, buildConnectRequest, parseReply,
+  buildRequest, buildConnectRequest, buildDestroyRequest, parseReply,
   netLong, netWord, encodePStr, encodeAsciiz,
 } = require('./ncp-packet');
 
@@ -53,7 +53,16 @@ class NCPClient {
   }
 
   async disconnect() {
-    await this._call(NCP_FUNC.LOGOUT, Buffer.alloc(0));
+    // NetWare protocol: send 0x5555 Destroy Service Connection.
+    // Also send Logout (0x63) for servers that track login state.
+    // 0x5555 receives no reply by spec — fire and forget.
+    try { await this._call(NCP_FUNC.LOGOUT, Buffer.alloc(0)); } catch (_) {}
+    try {
+      const pkt = buildDestroyRequest(this._seq, this._connLo, this._connHi, this._task);
+      this._socket.send(pkt, 0, pkt.length, this._port, this._host);
+    } catch (_) {}
+    // Brief drain before closing
+    await new Promise(r => setTimeout(r, 20));
     this._socket.close();
     this._socket = null;
   }

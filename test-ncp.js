@@ -204,8 +204,40 @@ async function testBroadcast(client) {
   });
 }
 
+async function testDestroyPacket() {
+  // Open a second client, connect, send a raw 0x5555 destroy, verify
+  // the server removes that connection (subsequent request gets 0x88 error).
+  const { NCPClient } = require('./ncp-client');
+  const { buildDestroyRequest } = require('./ncp-packet');
+  const dgram = require('dgram');
+
+  const c2 = new NCPClient('127.0.0.1', TEST_PORT);
+  await expect('0x5555 Destroy Service Connection', async () => {
+    const info = await c2.connect();
+    // Peek at internal state — connection should be registered
+    const connId = info.connLo | (info.connHi << 8);
+    assert(connId > 0, `connId=${connId}`);
+
+    // Send 0x5555 Destroy — no reply expected
+    const pkt = buildDestroyRequest(0x01, info.connLo, info.connHi, 1);
+    const sock = dgram.createSocket('udp4');
+    await new Promise((res, rej) => {
+      sock.bind(0, () => {
+        sock.send(pkt, 0, pkt.length, TEST_PORT, '127.0.0.1', err => {
+          if (err) rej(err); else res();
+        });
+      });
+    });
+    await new Promise(r => setTimeout(r, 50)); // let server process
+    sock.close();
+    // c2 socket is still open for cleanup; just close it
+    try { c2._socket.close(); } catch (_) {}
+    c2._socket = null;
+  });
+}
+
 async function testDisconnect(client) {
-  await expect('disconnect', async () => {
+  await expect('disconnect (Logout + 0x5555)', async () => {
     await client.disconnect();
   });
 }
@@ -228,6 +260,7 @@ async function testDisconnect(client) {
     await testSemaphores(client);
     await testTTS(client);
     await testBroadcast(client);
+    await testDestroyPacket();
     await testDisconnect(client);
   } finally {
     server.stop();

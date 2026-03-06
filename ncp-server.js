@@ -25,8 +25,8 @@
 
 const dgram  = require('dgram');
 const {
-  NCP_FUNC, BIND_SUB, SEMA_SUB, TTS_SUB, BCAST_SUB, ERR,
-  buildReply, parseRequest,
+  NCP_FUNC, BIND_SUB, SEMA_SUB, TTS_SUB, BCAST_SUB, ERR, DESTROY_TYPE,
+  buildReply, buildServerBusy, parseRequest,
   readNetLong, readNetWord, netLong, netWord,
   encodePStr, decodePStr,
 } = require('./ncp-packet');
@@ -295,6 +295,21 @@ class NCPServer {
     const req = parseRequest(msg);
     if (!req) return;
 
+    // ---- Destroy Service Connection (0x5555) ----------------------------
+    // Client is terminating — clean up exactly like Logout, no reply sent.
+    if (req.isDestroy) {
+      const destroyConnId = req.connLo | (req.connHi << 8);
+      const destroyConn   = this._conns.get(destroyConnId);
+      this._log_req(req, rinfo, `DESTROY connId=${destroyConnId}`);
+      this._conns.delete(destroyConnId);
+      if (destroyConn) {
+        this._cleanupConn(destroyConnId, destroyConn).catch(e =>
+          console.error(`[NCP] Destroy cleanup error connId=${destroyConnId}:`, e.message)
+        );
+      }
+      return; // No reply for Destroy
+    }
+
     // ---- Create Service Connection ----------------------------------------
     if (req.isConnect) {
       const connId = this._nextConn++;
@@ -541,6 +556,12 @@ class NCPServer {
       // ---- File service (everything else) ---------------------------------
       default:
         if (this._fileSvc) {
+          // Emit 0x9999 Server Busy before dispatching async file operation.
+          // This tells the client the request is being processed; it will
+          // retry when it receives 0x9999, and we send the real reply when done.
+          const busyPkt = buildServerBusy(req.seq, req.connLo, req.connHi, req.task);
+          this._send(busyPkt, rinfo.address, rinfo.port);
+
           this._fileSvc.handle(req.func, req.subFunc || 0, req.data || Buffer.alloc(0), connId)
             .then(({ err, reply }) => {
               this._reply(req, rinfo, err, reply || Buffer.alloc(0));
