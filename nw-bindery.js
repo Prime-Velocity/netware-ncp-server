@@ -211,7 +211,7 @@ class Bindery {
 
     // Find next object after lastId that matches
     for (const [id, obj] of this._objects) {
-      if (id <= lastId) continue;
+      if (lastId !== 0xFFFFFFFF && id <= lastId) continue;
       if (objType !== OBJ_TYPE.WILD && obj.type !== objType) continue;
       if (!matchName(obj.name)) continue;
 

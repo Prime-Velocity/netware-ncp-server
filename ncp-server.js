@@ -14,8 +14,13 @@
  *   Function 0x17 - Bindery (all sub-functions)
  *   Function 0x20 - Semaphores  (nwOpenSema/WaitOnSema/SignalSema/CloseSema)
  *   Function 0x22 - TTS         (Begin/End/Abort/IsCommitted)
+ *                   TTS Begin/End/Abort are wired to GitHubVolume
+ *                   branch transactions when a file service is attached.
  *   Function 0x21 - Broadcast   (Send/Get message, mode)
- *   Function 0x63 - Logout
+ *   Function 0x63 - Logout      (flushes open file handles via endOfJob)
+ *
+ * Connection reaper runs every CONN_TIMEOUT_MS to purge stale connections
+ * and flush their open file handles.
  */
 
 const dgram  = require('dgram');
@@ -30,14 +35,13 @@ const { Bindery } = require('./nw-bindery');
 const NCP_PORT         = 524;
 const MAX_BUFFER_SIZE  = 1024;
 const CONN_TIMEOUT_MS  = 30_000;
+const REAPER_INTERVAL  = 10_000;
 
 // ---- Semaphore store -------------------------------------------------------
-//  Matches NWSema.PAS: server-side semaphore objects
-//  Handle = 4-byte nwLong assigned by server
 class SemaphoreStore {
   constructor() {
-    this._semas   = new Map(); // handle -> { name, value, openCount, waiters: [] }
-    this._byName  = new Map(); // name.upper -> handle
+    this._semas   = new Map();
+    this._byName  = new Map();
     this._nextHdl = 1;
   }
 
@@ -65,13 +69,10 @@ class SemaphoreStore {
   }
 
   wait(handle, timeoutTicks) {
-    // In the real protocol, this blocks the workstation's connection.
-    // We resolve immediately: if value > 0, decrement and return ok;
-    // otherwise return timeout.  (Real async blocking left as exercise.)
     const s = this._semas.get(handle);
     if (!s) return ERR.SEMA_INVALID_HDL;
     if (s.value > 0) { s.value--; return ERR.SUCCESS; }
-    return ERR.SEMA_TIMEOUT;   // would block in real impl
+    return ERR.SEMA_TIMEOUT;
   }
 
   signal(handle) {
@@ -94,14 +95,12 @@ class SemaphoreStore {
   }
 }
 
-// ---- TTS store (per-connection) -------------------------------------------
-//  Matches NWTts.PAS: Transaction Tracking System
+// ---- TTS store (per-server, tracks state for isCommitted queries) ----------
 class TTSStore {
   constructor() {
-    this._txns       = new Map(); // txnId -> { state, timestamp }
+    this._txns       = new Map();
     this._nextId     = 1;
     this._enabled    = true;
-    // Per-workstation thresholds
     this._appLogical = 0;
     this._appPhysical= 0;
   }
@@ -125,7 +124,6 @@ class TTSStore {
   abort(id) {
     const t = this._txns.get(id);
     if (!t) return ERR.BAD_DATA;
-    t.state = 'aborted';
     this._txns.delete(id);
     return ERR.SUCCESS;
   }
@@ -142,13 +140,13 @@ class TTSStore {
 // ---- Broadcast message store ----------------------------------------------
 class BroadcastStore {
   constructor() {
-    this._messages = new Map(); // connId -> string[]
-    this._modes    = new Map(); // connId -> 0=accept,1=hold,2=deny
+    this._messages = new Map();
+    this._modes    = new Map();
   }
 
   send(toConnId, msg) {
     const mode = this._modes.get(toConnId) || 0;
-    if (mode === 2) return false; // deny
+    if (mode === 2) return false;
     if (!this._messages.has(toConnId)) this._messages.set(toConnId, []);
     this._messages.get(toConnId).push(msg);
     return true;
@@ -179,6 +177,7 @@ class NCPServer {
     this._bcast     = new BroadcastStore();
     this._fileSvc   = options.fileService || null;
     this._log       = [];
+    this._reaper    = null;
   }
 
   start() {
@@ -189,18 +188,87 @@ class NCPServer {
       this._socket.bind(this._port, this._host, () => {
         const addr = this._socket.address();
         console.log(`[NCP] Server listening on ${addr.address}:${addr.port}`);
+        this._reaper = setInterval(() => this._reapConnections(), REAPER_INTERVAL);
+        this._reaper.unref(); // don't prevent process exit
         resolve(this);
       });
     });
   }
 
   stop() {
+    if (this._reaper) { clearInterval(this._reaper); this._reaper = null; }
     if (this._socket) {
       try { this._socket.close(); } catch (_) {}
       this._socket.unref();
       this._socket = null;
     }
   }
+
+  // ---- Connection reaper --------------------------------------------------
+  // Purge connections that haven't been seen within CONN_TIMEOUT_MS.
+  // Flushes open file handles via fileSvc.endOfJob() and aborts any
+  // in-flight TTS branch transaction on the GitHub volume.
+
+  _reapConnections() {
+    const deadline = Date.now() - CONN_TIMEOUT_MS;
+    for (const [connId, conn] of this._conns) {
+      if (conn.lastSeen < deadline) {
+        console.log(`[NCP] Reaping stale connection connId=${connId}`);
+        this._cleanupConn(connId, conn).catch(e =>
+          console.error(`[NCP] Reaper cleanup error connId=${connId}:`, e.message)
+        );
+        this._conns.delete(connId);
+      }
+    }
+  }
+
+  async _cleanupConn(connId, conn) {
+    // Abort any in-flight TTS branch transaction
+    if (conn.ttsActive !== null && this._fileSvc) {
+      await this._abortVolTxns(conn).catch(() => {});
+    }
+    // Flush open file handles
+    if (this._fileSvc) {
+      await this._fileSvc.endOfJob(connId).catch(() => {});
+    }
+  }
+
+  // ---- Volume TTS helpers -------------------------------------------------
+  // These wire the NCP-level TTS calls to GitHubVolume branch operations.
+  // Each connection tracks:
+  //   conn.ttsActive   - current NCP txn id (null if none)
+  //   conn.ttsVolTxns  - Map<volName, volTxnId>
+
+  _beginVolTxns(conn) {
+    // beginTransaction() is synchronous in GitHubVolume
+    // (creates branch async fire-and-forget internally)
+    if (!this._fileSvc) return;
+    conn.ttsVolTxns = new Map();
+    for (const [name, vol] of this._fileSvc._volumes) {
+      const vtid = vol.beginTransaction();
+      conn.ttsVolTxns.set(name, vtid);
+    }
+  }
+
+  async _endVolTxns(conn) {
+    if (!this._fileSvc || !conn.ttsVolTxns) return;
+    for (const [name, vol] of this._fileSvc._volumes) {
+      const vtid = conn.ttsVolTxns.get(name);
+      if (vtid !== undefined) await vol.endTransaction(vtid);
+    }
+    conn.ttsVolTxns.clear();
+  }
+
+  async _abortVolTxns(conn) {
+    if (!this._fileSvc || !conn.ttsVolTxns) return;
+    for (const [name, vol] of this._fileSvc._volumes) {
+      const vtid = conn.ttsVolTxns.get(name);
+      if (vtid !== undefined) await vol.abortTransaction(vtid).catch(() => {});
+    }
+    conn.ttsVolTxns.clear();
+  }
+
+  // ---- Packet I/O ---------------------------------------------------------
 
   _send(data, host, port) {
     this._socket.send(data, 0, data.length, port, host);
@@ -213,12 +281,13 @@ class NCPServer {
 
   _log_req(req, rinfo, note) {
     const entry = {
-      ts: new Date().toISOString(),
+      ts:   new Date().toISOString(),
       from: `${rinfo.address}:${rinfo.port}`,
       func: `0x${req.func.toString(16).padStart(2,'0')}`,
       note,
     };
     this._log.push(entry);
+    if (this._log.length > 1000) this._log.shift(); // cap log
     console.log(`[NCP] ${entry.ts} ${entry.from} func=${entry.func} ${note}`);
   }
 
@@ -226,16 +295,18 @@ class NCPServer {
     const req = parseRequest(msg);
     if (!req) return;
 
-    // ---- Create Service Connection (0x1111) -------------------------------
+    // ---- Create Service Connection ----------------------------------------
     if (req.isConnect) {
       const connId = this._nextConn++;
       const connLo = connId & 0xFF;
       const connHi = (connId >> 8) & 0xFF;
       this._conns.set(connId, {
-        connLo, connHi, addr: rinfo.address, port: rinfo.port,
+        connLo, connHi,
+        addr: rinfo.address, port: rinfo.port,
         seq: 0, lastSeen: Date.now(), id: connId,
+        ttsActive:  null,   // current NCP TTS txn id
+        ttsVolTxns: null,   // Map<volName, volTxnId> for branch transactions
       });
-      // Reply: negotiated buffer size
       const reply = Buffer.alloc(2);
       reply.writeUInt16BE(MAX_BUFFER_SIZE, 0);
       this._reply({ seq: req.seq, connLo, connHi, task: req.task }, rinfo, 0, reply);
@@ -246,7 +317,6 @@ class NCPServer {
     const connId = req.connLo | (req.connHi << 8);
     const conn   = this._conns.get(connId);
     if (!conn) {
-      // Unknown connection
       this._reply(req, rinfo, 0x88, null);
       return;
     }
@@ -271,7 +341,6 @@ class NCPServer {
         let reply = null, err = ERR.SUCCESS;
 
         if (subFunc === SEMA_SUB.OPEN) {
-          // [1] initialValue, [2] nameLen, [3..] name
           const initVal  = req.data.readInt8(1);
           const nameLen  = req.data[2];
           const name     = req.data.slice(3, 3 + nameLen).toString('ascii');
@@ -320,55 +389,94 @@ class NCPServer {
         break;
       }
 
-      // ---- TTS (0x22) -----------------------------------------------------
+      // ---- TTS (0x22) ------------------------------------------------------
+      // In-memory TTSStore handles state tracking (isCommitted, enable/disable).
+      // When a file service with GitHubVolume backends is attached, Begin/End/Abort
+      // also drive branch-per-transaction on every volume: Begin opens a branch,
+      // End merges it to main, Abort deletes the branch.
       case NCP_FUNC.TTS: {
         const subFunc = req.data[0];
-        let reply = null, err = ERR.SUCCESS;
 
         if (subFunc === TTS_SUB.AVAILABLE) {
-          err = this._tts.available() ? ERR.TTS_UNAVAILABLE : ERR.SUCCESS;
-          // Returns 0x89FF if available (yes, the Pascal code checks for that)
-          err = this._tts.available() ? 0x89FF : ERR.SUCCESS;
-          reply = Buffer.alloc(0);
-          this._log_req(req, rinfo, `TTS AVAILABLE -> ${this._tts.available()}`);
-        }
-        else if (subFunc === TTS_SUB.BEGIN) {
-          const res = this._tts.begin();
-          err = res.err;
-          this._log_req(req, rinfo, `TTS BEGIN -> id=${res.id}`);
-          reply = Buffer.alloc(0);
-        }
-        else if (subFunc === TTS_SUB.END) {
-          const res = this._tts.begin(); // get an ID
-          err = this._tts.end(res.id);
-          reply = Buffer.alloc(4);
-          reply.writeUInt32BE(res.id, 0);
-          this._log_req(req, rinfo, `TTS END -> id=${res.id}`);
-        }
-        else if (subFunc === TTS_SUB.ABORT) {
-          const id = req.data.readUInt32BE(1);
-          err = this._tts.abort(id);
-          reply = Buffer.alloc(0);
-          this._log_req(req, rinfo, `TTS ABORT id=${id}`);
-        }
-        else if (subFunc === TTS_SUB.IS_COMMITTED) {
-          const id = req.data.readUInt32BE(1);
-          const committed = this._tts.isCommitted(id);
-          err = committed ? ERR.SUCCESS : ERR.TTS_UNAVAILABLE;
-          reply = Buffer.alloc(0);
-          this._log_req(req, rinfo, `TTS IS_COMMITTED id=${id} -> ${committed}`);
-        }
-        else if (subFunc === TTS_SUB.ENABLE) {
-          this._tts.enable(); reply = Buffer.alloc(0);
-          this._log_req(req, rinfo, 'TTS ENABLE');
-        }
-        else if (subFunc === TTS_SUB.DISABLE) {
-          this._tts.disable(); reply = Buffer.alloc(0);
-          this._log_req(req, rinfo, 'TTS DISABLE');
+          const avail = this._tts.available();
+          this._log_req(req, rinfo, `TTS AVAILABLE -> ${avail}`);
+          // NCP convention: reply completion 0xFF when TTS IS available
+          this._reply(req, rinfo, avail ? 0xFF : 0x00, Buffer.alloc(0));
+          break;
         }
 
-        const ncpErr = (err === ERR.SUCCESS || err === 0x89FF) ? (err >> 8) & 0xFF : ((err >> 8) & 0xFF) || 0xFF;
-        this._reply(req, rinfo, err === 0x89FF ? 0xFF : 0, reply || Buffer.alloc(0));
+        if (subFunc === TTS_SUB.BEGIN) {
+          if (!this._tts.available()) {
+            this._log_req(req, rinfo, 'TTS BEGIN -> unavailable');
+            this._reply(req, rinfo, 0xFF, Buffer.alloc(0));
+            break;
+          }
+          const res = this._tts.begin();
+          conn.ttsActive = res.id;
+          this._beginVolTxns(conn); // sync: creates branch async internally
+          this._log_req(req, rinfo, `TTS BEGIN -> id=${res.id} volBranches=${conn.ttsVolTxns ? conn.ttsVolTxns.size : 0}`);
+          this._reply(req, rinfo, 0x00, Buffer.alloc(0));
+          break;
+        }
+
+        if (subFunc === TTS_SUB.END) {
+          const id = conn.ttsActive;
+          if (id === null) {
+            this._log_req(req, rinfo, 'TTS END -> no active txn');
+            this._reply(req, rinfo, 0xFF, Buffer.alloc(0));
+            break;
+          }
+          const ttsErr = this._tts.end(id);
+          const reply = Buffer.alloc(4);
+          reply.writeUInt32BE(id, 0);
+          conn.ttsActive = null;
+          this._log_req(req, rinfo, `TTS END -> id=${id} merging ${conn.ttsVolTxns ? conn.ttsVolTxns.size : 0} vol branch(es)`);
+          // Merge vol branches async; reply immediately (matches real NW behavior)
+          this._endVolTxns(conn).catch(e =>
+            console.error(`[NCP] TTS END vol merge error:`, e.message)
+          );
+          this._reply(req, rinfo, ttsErr === ERR.SUCCESS ? 0 : 0xFF, reply);
+          break;
+        }
+
+        if (subFunc === TTS_SUB.ABORT) {
+          const id = conn.ttsActive;
+          const ttsErr = id !== null ? this._tts.abort(id) : ERR.BAD_DATA;
+          if (id === conn.ttsActive) conn.ttsActive = null;
+          this._log_req(req, rinfo, `TTS ABORT id=${id} aborting ${conn.ttsVolTxns ? conn.ttsVolTxns.size : 0} vol branch(es)`);
+          // Delete vol branches async
+          this._abortVolTxns(conn).catch(e =>
+            console.error(`[NCP] TTS ABORT vol delete error:`, e.message)
+          );
+          const ncpE = ttsErr === ERR.SUCCESS ? 0 : 0xFF;
+          this._reply(req, rinfo, ncpE, Buffer.alloc(0));
+          break;
+        }
+
+        if (subFunc === TTS_SUB.IS_COMMITTED) {
+          const id = req.data.readUInt32BE(1);
+          const committed = this._tts.isCommitted(id);
+          this._log_req(req, rinfo, `TTS IS_COMMITTED id=${id} -> ${committed}`);
+          this._reply(req, rinfo, committed ? 0x00 : 0xFF, Buffer.alloc(0));
+          break;
+        }
+
+        if (subFunc === TTS_SUB.ENABLE) {
+          this._tts.enable();
+          this._log_req(req, rinfo, 'TTS ENABLE');
+          this._reply(req, rinfo, 0, Buffer.alloc(0));
+          break;
+        }
+
+        if (subFunc === TTS_SUB.DISABLE) {
+          this._tts.disable();
+          this._log_req(req, rinfo, 'TTS DISABLE');
+          this._reply(req, rinfo, 0, Buffer.alloc(0));
+          break;
+        }
+
+        this._log_req(req, rinfo, `TTS UNKNOWN sub=0x${subFunc.toString(16)}`);
+        this._reply(req, rinfo, 0xFF, Buffer.alloc(0));
         break;
       }
 
@@ -386,7 +494,6 @@ class NCPServer {
             const msg        = req.data.slice(off, off + msgLen).toString('ascii'); off += msgLen;
             this._bcast.send(targetConn, msg);
           }
-          // Reply: result for each connection (0 = success)
           reply = Buffer.alloc(connCount + 1);
           reply[0] = connCount;
           this._log_req(req, rinfo, `BCAST SEND to ${connCount} connections`);
@@ -419,16 +526,21 @@ class NCPServer {
       }
 
       // ---- Logout (0x63) --------------------------------------------------
+      // Abort any in-flight TTS branch, flush open file handles, remove conn.
       case NCP_FUNC.LOGOUT: {
-        this._conns.delete(connId);
-        this._reply(req, rinfo, 0, Buffer.alloc(0));
         this._log_req(req, rinfo, `LOGOUT connId=${connId}`);
+        this._reply(req, rinfo, 0, Buffer.alloc(0));
+        this._conns.delete(connId);
+        // Cleanup async after reply is sent
+        this._cleanupConn(connId, conn).catch(e =>
+          console.error(`[NCP] Logout cleanup error connId=${connId}:`, e.message)
+        );
         break;
       }
 
+      // ---- File service (everything else) ---------------------------------
       default:
         if (this._fileSvc) {
-          // Delegate to file service (async — must re-enter via promise)
           this._fileSvc.handle(req.func, req.subFunc || 0, req.data || Buffer.alloc(0), connId)
             .then(({ err, reply }) => {
               this._reply(req, rinfo, err, reply || Buffer.alloc(0));
@@ -440,7 +552,7 @@ class NCPServer {
             });
         } else {
           this._log_req(req, rinfo, `UNKNOWN func=0x${req.func.toString(16)}`);
-          this._reply(req, rinfo, 0x7E, Buffer.alloc(0)); // unsupported function
+          this._reply(req, rinfo, 0x7E, Buffer.alloc(0));
         }
     }
   }
