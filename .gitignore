@@ -1,3 +1,37 @@
+# Node
 node_modules/
-*.log
+npm-debug.log*
+.npm
+
+# Credentials — never commit these
 .env
+.env.*
+*.token
+secrets.js
+config.local.js
+
+# GitHub tokens specifically
+ghp_*
+gho_*
+ghs_*
+
+# Runtime / OS
+.DS_Store
+*.log
+*.pid
+*.seed
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Build artifacts
+dist/
+build/
+*.min.js
+
+# Test output
+coverage/
+.nyc_output/

@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 Genesis Systems (a dba of Exponential Systems)
 'use strict';
 /**
  * nw-bindery.js  --  In-memory Bindery
@@ -211,7 +209,7 @@ class Bindery {
 
     // Find next object after lastId that matches
     for (const [id, obj] of this._objects) {
-      if (lastId !== 0xFFFFFFFF && id <= lastId) continue;
+      if (id <= lastId) continue;
       if (objType !== OBJ_TYPE.WILD && obj.type !== objType) continue;
       if (!matchName(obj.name)) continue;
 

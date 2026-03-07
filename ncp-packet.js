@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// Copyright 2025 Genesis Systems (a dba of Exponential Systems)
 'use strict';
 /**
  * ncp-packet.js  --  NetWare Core Protocol packet framing
@@ -39,8 +37,7 @@
 const REQUEST_TYPE    = 0x2222;
 const REPLY_TYPE      = 0x3333;
 const CONNECT_TYPE    = 0x1111;   // Create Service Connection
-const DESTROY_TYPE     = 0x5555;   // Destroy Service Connection
-const SERVER_BUSY_TYPE = 0x9999;   // Request Being Processed (server busy)
+const DESTROY_TYPE    = 0x5555;   // Destroy Service Connection (type field)
 
 const NCP_HEADER_LEN  = 7;   // request header bytes before data
 const NCP_REPLY_HDR   = 8;   // reply header bytes before data
@@ -219,7 +216,6 @@ function parseRequest(buf) {
     func    : buf[6],
     data    : buf.slice(NCP_HEADER_LEN),
     isConnect: type === CONNECT_TYPE,
-    isDestroy: type === DESTROY_TYPE,
   };
 }
 
@@ -300,43 +296,10 @@ function ipxAddrStr(network, node, socket) {
   return `${net}:${nd}:${sk}`;
 }
 
-
-// ---- Server Busy (0x9999) -------------------------------------------------
-// Emitted by server for async operations that will take time.
-// The client re-sends the same request; server replies with 0x9999 again
-// until the result is ready, then sends the real 0x3333 reply.
-// seq/conn fields echo the original request so the client can match it.
-
-
-function buildDestroyRequest(seq, connLo, connHi, task) {
-  // NCP Type 0x5555 — Destroy Service Connection
-  // No data payload; the type field itself signals the intent.
-  const buf = Buffer.alloc(NCP_HEADER_LEN);
-  buf.writeUInt16BE(DESTROY_TYPE, 0);
-  buf[2] = seq & 0xFF;
-  buf[3] = connLo & 0xFF;
-  buf[4] = task & 0xFF;
-  buf[5] = connHi & 0xFF;
-  buf[6] = 0x00; // no function code needed
-  return buf;
-}
-
-function buildServerBusy(seq, connLo, connHi, task) {
-  const buf = Buffer.alloc(8);
-  buf.writeUInt16BE(SERVER_BUSY_TYPE, 0);
-  buf[2] = seq & 0xFF;
-  buf[3] = connLo & 0xFF;
-  buf[4] = task & 0xFF;
-  buf[5] = connHi & 0xFF;
-  buf[6] = 0x00; // completion
-  buf[7] = 0x00; // connection status
-  return buf;
-}
-
 module.exports = {
-  REQUEST_TYPE, REPLY_TYPE, CONNECT_TYPE, DESTROY_TYPE, SERVER_BUSY_TYPE,
+  REQUEST_TYPE, REPLY_TYPE, CONNECT_TYPE,
   NCP_FUNC, BIND_SUB, SEMA_SUB, TTS_SUB, BCAST_SUB, OBJ_TYPE, ERR,
-  buildRequest, buildConnectRequest, buildDestroyRequest, buildReply, buildServerBusy,
+  buildRequest, buildConnectRequest, buildReply,
   parseRequest, parseReply,
   netLong, netWord, readNetLong, readNetWord,
   encodePStr, decodePStr, encodeAsciiz, decodeAsciiz,
