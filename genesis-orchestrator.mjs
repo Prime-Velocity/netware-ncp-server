@@ -34,8 +34,8 @@
  *
  * Env:
  *   ANTHROPIC_API_KEY   primary provider (+ GEMINI_API_KEY, OPENAI_API_KEY, XAI_API_KEY for mux fallback)
- *   GH_TOKEN            optional: fetch codebase context from GitHub
- *   GENESIS_MODEL       override model (default: claude-sonnet-4-20250514)
+ *   GITHUB_TOKEN_PRIME_VELOCITY  GitHub context fetch (from vault)
+ *   GENESIS_MODEL       optional model override (vault key)
  *   GENESIS_OUT         override output dir (default: ./genesis-out)
  */
 
@@ -43,13 +43,15 @@
 
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
 import { join }                                               from 'path';
-import { muxCall }                                            from './provider-mux.mjs';
+import { muxCall, vaultGet }                                   from './provider-mux.mjs';
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const GH_TOKEN = process.env.GH_TOKEN || process.env.PRIME_VELOCITY_TOKEN;
-const MODEL    = process.env.GENESIS_MODEL ?? 'claude-sonnet-4-20250514';
-const OUT_DIR  = process.env.GENESIS_OUT   ?? './genesis-out';
+
+const GH_TOKEN = vaultGet('GITHUB_TOKEN_PRIME_VELOCITY') ?? vaultGet('GITHUB_TOKEN_BCLARK00');
+const MODEL    = vaultGet('GENESIS_MODEL') ?? 'claude-sonnet-4-20250514';
+const OUT_DIR  = vaultGet('GENESIS_OUT')   ?? './genesis-out';
+
 
 const DRY_RUN      = process.argv.includes('--dry-run');
 const GOAL_IDX     = process.argv.indexOf('--goal');
