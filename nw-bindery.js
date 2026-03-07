@@ -208,8 +208,10 @@ class Bindery {
     };
 
     // Find next object after lastId that matches
+    // 0xFFFFFFFF is the NetWare sentinel meaning "start from beginning"
+    const startScan = lastId === 0xFFFFFFFF;
     for (const [id, obj] of this._objects) {
-      if (id <= lastId) continue;
+      if (!startScan && id <= lastId) continue;
       if (objType !== OBJ_TYPE.WILD && obj.type !== objType) continue;
       if (!matchName(obj.name)) continue;
 

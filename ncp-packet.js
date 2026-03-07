@@ -202,6 +202,19 @@ function buildReply(seq, connLo, connHi, task, completion, data) {
   return buf;
 }
 
+// 0x5555 Destroy Service Connection packet
+function buildDestroyRequest(seq, connLo, connHi, task) {
+  const buf = Buffer.alloc(NCP_HEADER_LEN);
+  buf.writeUInt16BE(DESTROY_TYPE, 0);
+  buf[2] = seq    & 0xFF;
+  buf[3] = connLo & 0xFF;
+  buf[4] = task   & 0xFF;
+  buf[5] = connHi & 0xFF;
+  buf[6] = 0x00;
+  buf[7] = 0x00;
+  return buf;
+}
+
 // ---- Packet parsers --------------------------------------------------------
 
 function parseRequest(buf) {
@@ -299,7 +312,7 @@ function ipxAddrStr(network, node, socket) {
 module.exports = {
   REQUEST_TYPE, REPLY_TYPE, CONNECT_TYPE,
   NCP_FUNC, BIND_SUB, SEMA_SUB, TTS_SUB, BCAST_SUB, OBJ_TYPE, ERR,
-  buildRequest, buildConnectRequest, buildReply,
+  buildRequest, buildConnectRequest, buildReply, buildDestroyRequest,
   parseRequest, parseReply,
   netLong, netWord, readNetLong, readNetWord,
   encodePStr, decodePStr, encodeAsciiz, decodeAsciiz,
