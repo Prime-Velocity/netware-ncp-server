@@ -20,6 +20,61 @@
  */
 
 const https = require('https');
+const net   = require('net');
+
+// ── Proxy tunnel agent (reads HTTPS_PROXY env, works in Claude containers) ──
+
+function makeProxyAgent() {
+  const raw = process.env.HTTPS_PROXY || process.env.https_proxy;
+  if (!raw) return undefined;
+  try {
+    // http://user:pass@host:port
+    const m = raw.match(/^https?:\/\/([^@]+)@([^:]+):(\d+)/);
+    if (!m) return undefined;
+    const [, userPass, host, port] = m;
+    const auth = Buffer.from(userPass).toString('base64');
+    return { host, port: parseInt(port), auth };
+  } catch { return undefined; }
+}
+
+const PROXY = makeProxyAgent();
+
+function proxyRequest(opts, body) {
+  return new Promise((resolve, reject) => {
+    if (!PROXY) {
+      // Direct connection
+      const payload = body || null;
+      const req = https.request(opts, res => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, chunks, headers: res.headers }));
+      });
+      req.on('error', reject);
+      if (payload) req.write(payload);
+      req.end();
+      return;
+    }
+    // CONNECT tunnel
+    const tunnel = net.createConnection(PROXY.port, PROXY.host, () => {
+      tunnel.write(
+        'CONNECT ' + opts.hostname + ':443 HTTP/1.1\r\n' +
+        'Host: ' + opts.hostname + ':443\r\n' +
+        'Proxy-Authorization: Basic ' + PROXY.auth + '\r\n\r\n'
+      );
+      tunnel.once('data', () => {
+        const req = https.request({ ...opts, socket: tunnel, agent: false }, res => {
+          const chunks = [];
+          res.on('data', c => chunks.push(c));
+          res.on('end', () => resolve({ status: res.statusCode, chunks, headers: res.headers }));
+        });
+        req.on('error', reject);
+        if (body) req.write(body);
+        req.end();
+      });
+    });
+    tunnel.on('error', reject);
+  });
+}
 
 // ---- tiny GitHub API client -----------------------------------------------
 
@@ -32,41 +87,32 @@ class GitHubAPI {
   }
 
   _req(method, path, body) {
-    return new Promise((resolve, reject) => {
-      const payload = body ? JSON.stringify(body) : null;
-      const opts = {
-        hostname : 'api.github.com',
-        path,
-        method,
-        headers  : {
-          'Authorization' : `token ${this.token}`,
-          'User-Agent'    : 'nw-github-volume/1.0 (NetWare 3.12 compatible)',
-          'Accept'        : 'application/vnd.github.v3+json',
-          'Content-Type'  : 'application/json',
-        },
-      };
-      if (payload) opts.headers['Content-Length'] = Buffer.byteLength(payload);
+    const payload = body ? JSON.stringify(body) : null;
+    const opts = {
+      hostname : 'api.github.com',
+      path,
+      method,
+      headers  : {
+        'Authorization' : `token ${this.token}`,
+        'User-Agent'    : 'nw-github-volume/1.0 (NetWare 3.12 compatible)',
+        'Accept'        : 'application/vnd.github.v3+json',
+        'Content-Type'  : 'application/json',
+      },
+    };
+    if (payload) opts.headers['Content-Length'] = Buffer.byteLength(payload);
 
-      const req = https.request(opts, res => {
-        const chunks = [];
-        res.on('data', c => chunks.push(c));
-        res.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8');
-          let json = null;
-          try { json = JSON.parse(text); } catch (_) { json = text; }
-          if (res.statusCode >= 400) {
-            const msg = json && json.message ? json.message : text;
-            const err = new Error(`GitHub ${method} ${path} -> ${res.statusCode}: ${msg}`);
-            err.status = res.statusCode;
-            err.github = json;
-            return reject(err);
-          }
-          resolve({ status: res.statusCode, data: json });
-        });
-      });
-      req.on('error', reject);
-      if (payload) req.write(payload);
-      req.end();
+    return proxyRequest(opts, payload).then(({ status, chunks }) => {
+      const text = Buffer.concat(chunks).toString('utf8');
+      let json = null;
+      try { json = JSON.parse(text); } catch (_) { json = text; }
+      if (status >= 400) {
+        const msg = json && json.message ? json.message : text;
+        const err = new Error(`GitHub ${method} ${path} -> ${status}: ${msg}`);
+        err.status = status;
+        err.github = json;
+        throw err;
+      }
+      return { status, data: json };
     });
   }
 
